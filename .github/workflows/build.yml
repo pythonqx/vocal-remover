@@ -1,0 +1,63 @@
+name: App bauen
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODEL_TAG: model-v1
+      MODEL_FILE: mel_band_roformer_deux_lowmem.onnx
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Projekt entpacken
+        run: unzip -q -o VocalRemover.zip -d src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: KI-Modell vorbereiten (nur beim ersten Mal)
+        run: |
+          if gh release view "$MODEL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Modell ist schon vorhanden."
+            exit 0
+          fi
+          pip install -q onnx==1.17.0 numpy
+          curl -sSL --retry 5 -o original.onnx \
+            https://github.com/Temmis2077/OSW/releases/download/separation-model-deux-v1/mel_band_roformer_deux.onnx
+          python src/VocalRemover/tools/lowmem.py original.onnx "$MODEL_FILE"
+          gh release create "$MODEL_TAG" "$MODEL_FILE" --repo "$GITHUB_REPOSITORY" \
+            --title "KI-Modell" \
+            --notes "Mel-Band RoFormer deux von becruily (CC BY-NC 4.0), ONNX-Umwandlung von Temmis2077, speichersparend umgebaut. Nur fuer private, nicht-kommerzielle Nutzung."
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Android-Werkzeuge installieren
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: APK bauen
+        working-directory: src/VocalRemover
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PmodelUrl="https://github.com/${GITHUB_REPOSITORY}/releases/download/${MODEL_TAG}/${MODEL_FILE}"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/VocalRemover.apk"
+
+      - name: APK veroeffentlichen
+        run: |
+          gh release create "app-${GITHUB_RUN_NUMBER}" VocalRemover.apk --repo "$GITHUB_REPOSITORY" \
+            --title "Vocal Remover (Build ${GITHUB_RUN_NUMBER})" --notes "Zum Installieren VocalRemover.apk auf dem Handy herunterladen und oeffnen." --latest
